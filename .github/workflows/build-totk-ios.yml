@@ -24,7 +24,10 @@ jobs:
 
       - name: Inject Prod Keys
         run: |
+          mkdir -p ~/.switch
           echo "${{ secrets.PROD_KEYS }}" > prod.keys
+          cp prod.keys ~/.switch/prod.keys
+          cp prod.keys ~/.switch/keys.txt
 
       - name: Download Game Files & Firmware from MEGA.nz
         run: |
@@ -43,6 +46,7 @@ jobs:
             --update update.nsp \
             --firmware firmware/ \
             --platform ios \
+            --no-check-os \
             -o TOTK.ipa
 
       - name: Upload iOS IPA Artifact
