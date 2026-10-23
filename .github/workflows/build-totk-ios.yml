@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-totk-ios:
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - name: Checkout Repository
@@ -13,10 +13,9 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Build & Conversion Dependencies
+      - name: Install Build & Download Tools
         run: |
-          brew install xcodegen cmake ninja opus libvpx python@3.14 megatools dotnet-sdk
-          dotnet tool install -g hactoolnet
+          brew install xcodegen cmake ninja opus libvpx python@3.14 megatools
 
       - name: Set up Rust iOS Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,18 +36,8 @@ jobs:
           megadl '${{ secrets.MEGA_UPDATE_URL }}' --path update.nsp
           megadl '${{ secrets.MEGA_FIRMWARE_URL }}' --path firmware.zip
           
-          # Extract the system firmware NCAs
+          # Extract system firmware NCAs
           unzip -q firmware.zip -d firmware/
-
-      - name: Convert Game Dumps to Standard AES-CTR ExeFS
-        run: |
-          # Ensure hactoolnet path is available
-          export PATH="$HOME/.dotnet/tools:$PATH"
-          
-          # Convert/Re-pack base and update if they contain Type 4 ExeFS encryption
-          echo "Processing base.nsp and update.nsp with hactoolnet..."
-          hactoolnet -k ~/.switch/prod.keys -t nsp base.nsp --outdir base_extracted/ || true
-          hactoolnet -k ~/.switch/prod.keys -t nsp update.nsp --outdir update_extracted/ || true
 
       - name: Run TOTK 1.4.3 Native iOS Build Pipeline
         run: |
