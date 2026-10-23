@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-totk-ios:
-    runs-on: macos-15
+    runs-on: macos-latest
 
     steps:
       - name: Checkout Repository
@@ -43,7 +43,6 @@ jobs:
             --update update.nsp \
             --firmware firmware/ \
             --platform ios \
-            --no-check-os \
             -o TOTK.ipa
 
       - name: Upload iOS IPA Artifact
