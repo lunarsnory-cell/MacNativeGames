@@ -1,0 +1,53 @@
+name: Build TOTK v1.4.3 iOS (.ipa)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-totk-ios:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Build & Download Tools
+        run: |
+          brew install xcodegen opus libvpx python@3.14 megatools
+
+      - name: Set up Rust iOS Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Inject Prod Keys
+        run: |
+          echo "${{ secrets.PROD_KEYS }}" > prod.keys
+
+      - name: Download Game Files & Firmware from MEGA.nz
+        run: |
+          # Download base game, update, and firmware using megatools
+          megadl '${{ secrets.MEGA_BASE_URL }}' --path base.nsp
+          megadl '${{ secrets.MEGA_UPDATE_URL }}' --path update.nsp
+          megadl '${{ secrets.MEGA_FIRMWARE_URL }}' --path firmware.zip
+          
+          # Extract the 22.5.0 system firmware NCAs
+          unzip -q firmware.zip -d firmware/
+
+      - name: Run TOTK 1.4.3 Native iOS Build Pipeline
+        run: |
+          python3 dm/ios/tools/ios_metal.py \
+            --base base.nsp \
+            --update update.nsp \
+            --firmware firmware/ \
+            --keys prod.keys \
+            --target ios \
+            --game totk
+
+      - name: Upload iOS IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TOTK-v1.4.3-iOS-IPA
+          path: "**/*.ipa"
