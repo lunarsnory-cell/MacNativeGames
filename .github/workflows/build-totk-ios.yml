@@ -15,7 +15,7 @@ jobs:
 
       - name: Install Build & Download Tools
         run: |
-          brew install xcodegen opus libvpx python@3.14 megatools
+          brew install xcodegen cmake ninja opus libvpx python@3.14 megatools
 
       - name: Set up Rust iOS Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -40,9 +40,9 @@ jobs:
         run: |
           python3.14 build_app.py base.nsp \
             -k prod.keys \
-            -u update.nsp \
+            --update update.nsp \
             --firmware firmware/ \
-            --target ios \
+            --platform ios \
             -o TOTK.ipa
 
       - name: Upload iOS IPA Artifact
