@@ -38,13 +38,12 @@ jobs:
 
       - name: Run TOTK 1.4.3 Native iOS Build Pipeline
         run: |
-          python3 dm/ios/tools/ios_metal.py \
-            --base base.nsp \
-            --update update.nsp \
+          python3.14 build_app.py base.nsp \
+            -k prod.keys \
+            -u update.nsp \
             --firmware firmware/ \
-            --keys prod.keys \
             --target ios \
-            --game totk
+            -o TOTK.ipa
 
       - name: Upload iOS IPA Artifact
         uses: actions/upload-artifact@v4
