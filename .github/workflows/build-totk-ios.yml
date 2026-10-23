@@ -43,10 +43,12 @@ jobs:
             --update update.nsp \
             --firmware firmware/ \
             --platform ios \
+            --no-shader-reminder
             -o TOTK.ipa
 
       - name: Upload iOS IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TOTK-v1.4.3-iOS-IPA
-          path: "**/*.ipa"
+          path: TOTK.ipa
+          if-no-files-found: error
