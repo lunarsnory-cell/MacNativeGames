@@ -24,10 +24,7 @@ jobs:
 
       - name: Inject Prod Keys
         run: |
-          mkdir -p ~/.switch
           echo "${{ secrets.PROD_KEYS }}" > prod.keys
-          cp prod.keys ~/.switch/prod.keys
-          cp prod.keys ~/.switch/keys.txt
 
       - name: Download Game Files & Firmware from MEGA.nz
         run: |
@@ -36,7 +33,7 @@ jobs:
           megadl '${{ secrets.MEGA_UPDATE_URL }}' --path update.nsp
           megadl '${{ secrets.MEGA_FIRMWARE_URL }}' --path firmware.zip
           
-          # Extract system firmware NCAs
+          # Extract the 22.5.0 system firmware NCAs
           unzip -q firmware.zip -d firmware/
 
       - name: Run TOTK 1.4.3 Native iOS Build Pipeline
@@ -46,6 +43,7 @@ jobs:
             --update update.nsp \
             --firmware firmware/ \
             --platform ios \
+            --no-check-os \
             -o TOTK.ipa
 
       - name: Upload iOS IPA Artifact
