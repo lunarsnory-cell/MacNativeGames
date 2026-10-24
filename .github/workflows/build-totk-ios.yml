@@ -43,7 +43,7 @@ jobs:
             --update update.nsp \
             --firmware firmware/ \
             --platform ios \
-            --no-shader-reminder
+            --no-shader-reminder \
             -o TOTK.ipa
 
       - name: Upload iOS IPA Artifact
