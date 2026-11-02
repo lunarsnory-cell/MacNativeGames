@@ -227,16 +227,23 @@ NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool
 static int cmdlog_env(void) { static int on = -1; if (on < 0) on = getenv("TOTK_CMD_LOG") != NULL; return on; }
 static int chainlog_env(void) { static int on = -1; if (on < 0) on = getenv("TOTK_CHAIN_LOG") != NULL; return on; }   // once: EndRecording runs per command buffer
 static int poollog_env(void) { static int on = -1; if (on < 0) on = getenv("TOTK_POOL_LOG") != NULL; return on; }
-#ifdef GAME_BOTW
 static void guest_chain(const char *what);
-#endif
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     memset(o, 0, sizeof *o);
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size;
     if ((o->flags & (NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) && !totk_vpool_init(o)) { o->magic = 0; return 0; }
     int gpu_visible = !(o->flags & NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS);
-    if (o->mem && gpu_visible) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+    /* #1367 (TOTK 1.2.1): the game now and then initialises a memory pool of zero bytes (the crashing one was
+       GPU-visible). mtl_pool_add then asked Metal for a zero-copy buffer of length 0, which always comes back nil,
+       and the game aborted after 8 retries. A pool without bytes holds no address the GPU can use: the pool object
+       stays valid as is (Map, GetBufferAddress, buffers), it only gets no zero-copy buffer and no dirty range, for
+       there is nothing in it to track. */
+    if (o->mem && o->size && gpu_visible) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+    else if (o->mem && !o->size) {   /* with the game code that asked: whether the game means an empty pool or a size of ours came back 0 */
+        static _Atomic unsigned said;
+        if (atomic_fetch_add(&said, 1) < 4) { LOG("MemoryPoolInitialize 池 %p 没有字节（size=0，flags=%#x）：不建零拷贝缓冲，也不进脏页跟踪", (void *)o->mem, o->flags); guest_chain("empty memory pool"); }
+    }
     if (!o->mem) LOG("【红】MemoryPoolInitialize 池没有存储 flags=%#x size=%#llx", o->flags, o->size);
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
     if (poollog_env()) LOG("[pool] %p mem=%p..%p size=%#llx flags=%#x game=%p", (void *)p, (void *)o->mem, (void *)(o->mem + o->size), o->size, o->flags, (void *)o->game_mem);
@@ -248,7 +255,10 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
 }
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     pool_t *o = (pool_t *)p;
-    if (o->mem && !(o->flags & NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS)) { x_drain(); nvn_dirty_remove_range(o->mem); mtl_pool_del(o->mem); }
+    /* The same condition nvnMemoryPoolInitialize registered the pool under: an empty pool (size 0) was given no
+       buffer and no dirty range, so its teardown is a no-op — a removal by address could otherwise hit a live
+       neighbour's range when the game's allocator handed the empty pool an address next to one (#1367). */
+    if (o->mem && o->size && !(o->flags & NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS)) { x_drain(); nvn_dirty_remove_range(o->mem); mtl_pool_del(o->mem); }
     totk_vpool_fini(o); o->magic = 0;
 }
 /* A mirrored render target has private Metal storage. Reconcile GPU writes at mapped-range cache maintenance too:
@@ -1286,14 +1296,32 @@ NVN(nvnCommandBufferReportCounter, void, NVNcommandBuffer *c, NVNcounterType t, 
     if (cmdlog_on()) LOG("[cmd] F%llu ReportCounter type=%d addr=%#llx", (unsigned long long)g_frame_pub, (int)t, (unsigned long long)a);
     uint8_t *p = cmd_alloc(CB(c), 24); put_hdr(p, OP_REPORT_COUNTER, 24); uint64_t tt = t; memcpy(p + 8, &tt, 8); memcpy(p + 16, &a, 8);
 }
+static void vr_ublog(const char *kind, uint64_t dst, size_t n, uint64_t src, const void *data);
 NVN(nvnCommandBufferCopyBufferToBuffer, void, NVNcommandBuffer *c, NVNbufferAddress src, NVNbufferAddress dst, size_t n, int flags) {
+    vr_ublog("copy", dst, n, src, NULL);
     (void)flags;
     uint8_t *p = cmd_alloc(CB(c), 32); put_hdr(p, OP_COPY_B2B, 32); uint64_t nn = n;
     memcpy(p + 8, &src, 8); memcpy(p + 16, &dst, 8); memcpy(p + 24, &nn, 8);
 }
 // uniform 更新：数据在录制时拷进命令内存（NVN 语义：录制后调用方可改原数据），提交时写进缓冲
 // uniform update: the data is copied into command memory at record time (NVN semantics: the caller may modify the original data after recording) and written into the buffer at submit
+/* TOTK_VR_UBLOG=1 (diagnostic for VR stage 2, off by default): GPU-side writes into the main camera blocks (addresses
+   published by the replay's camera scan, nvn_mtl.m vr_camscan: g_vr_cam_blocks): uniform updates and buffer-to-buffer
+   copies whose destination overlaps one, with the game's call chain and the source, at most 40 lines. The CPU never
+   stores into the block itself (a write watchpoint on it stays silent while its content changes every frame). */
+uint64_t g_vr_cam_blocks[8];   // written by the replay thread, read here: a stale read only misses a line
+static void vr_ublog(const char *kind, uint64_t dst, size_t n, uint64_t src, const void *data) {
+    static int on = -1, lines; if (on < 0) on = getenv("TOTK_VR_UBLOG") != NULL;
+    if (!on || lines >= 40) return;
+    int hit = -1; for (int i = 0; i < 8 && hit < 0; i++) { uint64_t b = g_vr_cam_blocks[i]; if (b && dst < b + 2368 && dst + n > b) hit = i; }
+    if (hit < 0) return;
+    char what[256]; snprintf(what, sizeof what, "[vr] camera write F%llu %s dst %#llx (block %#llx %+lld) n %zu src %#llx data %p",
+                             (unsigned long long)g_frame_pub, kind, (unsigned long long)dst, (unsigned long long)g_vr_cam_blocks[hit],
+                             (long long)(dst - g_vr_cam_blocks[hit]), n, (unsigned long long)src, data);
+    guest_chain(what); lines++;
+}
 NVN(nvnCommandBufferUpdateUniformBuffer, void, NVNcommandBuffer *c, NVNbufferAddress buf, size_t bufsz, ptrdiff_t off, size_t n, const void *data) {
+    vr_ublog("update", buf + off, n, 0, data);
     (void)bufsz;
     uint32_t sz = (uint32_t)(24 + n);
     uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, OP_UPDATE_UB, (sz + 7) & ~7u);
@@ -2484,8 +2512,8 @@ void nvn_fps_lock_set(int fps) {
     if (atomic_exchange(&g_fps_lock, fps) != fps) { if (fps) LOG("[nvn] 锁帧：%d 帧", fps); else LOG("[nvn] 锁帧：关"); }
 }
 int nvn_fps_lock(void) { return atomic_load(&g_fps_lock); }
-/* The rate the game is held at now (0: not held): 30 for a movie or the phone's hold, then 30 / 40 / 50 for interpolation
-   30+30 / 40+40 / 50+50, else the frame lock. */
+/* The rate the game is held at now (0: not held): 30 for a movie or the phone's hold, then 30 / 40 / 50 / 60 for interpolation
+   30+30 / 40+40 / 50+50 / 60+60, else the frame lock. */
 static int game_hold_fps(void) {
     if (runtime_game_fps_limit() == 30 || phone_holds_30()) return 30;
     int m = mfx_hold_fps(mfx_enabled());
@@ -2895,7 +2923,7 @@ static uint64_t present_period(const win_t *o) {
     unsigned itv = present_ticks(o); int m = mfx_enabled(), hz = g_uncapped && !uncapped_now() ? g_paced_hz : g_hz;
     { static int was = -1; if (was >= 0 && m != was)
         LOG("[nvn] 出图节拍切换：%s%s", mfx_hold_fps(m) ? (mfx_own_clock() ? "补帧：游戏按自己的时钟每秒 " : "补帧：跟随显示器，游戏每秒 ") : "",
-                                    mfx_hold_fps(m) ? (m == MFX_30 ? "30 帧（30+30）" : m == MFX_40 ? "40 帧（40+40）" : "50 帧（50+50）") :
+                                    mfx_hold_fps(m) ? (m == MFX_30 ? "30 帧（30+30）" : m == MFX_40 ? "40 帧（40+40）" : m == MFX_60 ? "60 帧（60+60）" : "50 帧（50+50）") :
                                     m == MFX_MAX ? (g_uncapped ? "补帧 不限帧：不限帧率，每帧补一帧" : "补帧 不限帧：按游戏的出图间隔，每帧补一帧") :
                                     g_uncapped ? "补帧关：不限帧率" : "补帧关：按游戏的出图间隔"); was = m; }
     { int hold = game_hold_fps(); if (hold) return 1000000000ull / (uint64_t)hold; }   /* exactly the held rate, by display ticks or by our own clock */
@@ -2967,6 +2995,9 @@ void dm_nvn_probe_present_interval(void) {
         nvn_fps_lock_set(60);
         if (present_period(&w) != 1000000000ull / 60 || present_ticks(&w) != ticks60[r] || uncapped_now() || mfx_own_clock() != (rates[r] % 60 != 0))
             die("present interval probe: the 60 fps lock must pace exactly 60 fps");
+        nvn_fps_lock_set(120);
+        if (present_period(&w) != 1000000000ull / 120 || mfx_own_clock() != (rates[r] % 120 != 0))
+            die("present interval probe: switching 60 to 120 must immediately use 1/120 seconds");
         nvn_fps_lock_set(30);
         if (present_period(&w) != 1000000000ull / 30 || present_ticks(&w) != ticks30[r] || uncapped_now() || mfx_own_clock() != (rates[r] % 30 != 0))
             die("present interval probe: the 30 fps lock must pace as the 30 fps hold");
